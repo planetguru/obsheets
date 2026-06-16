@@ -1,0 +1,27 @@
+# ── Secrets / local env (never commit) ───────────────────────────────────────
+.env
+.env.local
+*.env.local
+webapp/.env.local
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+autoobs/venv/
+venv/
+autoobs/data/
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+webapp/node_modules/
+webapp/.next/
+webapp/data/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Local tooling / OS ────────────────────────────────────────────────────────
+.claude/
+.DS_Store
+
+# Gala data fixtures (real swimmer data — keep private)
+webapp/fixtures/
