@@ -67,12 +67,12 @@ def canon_gender(s: str) -> str:
 
 
 def clean_time(t: str) -> str:
-    """Pull the time token out of blobs like '1:20.50L Approved' or '42.18S'."""
+    """Pull the time token out of blobs like '1:20.50L Approved', '42.18S', 'X4:30.46S'."""
     t = t.strip()
     if "NT" in t.upper().split() or t.upper() == "NT":
         return "NT"
-    m = re.match(r"\d[\d:.]*", t)
-    return m.group(0).rstrip(".") if m else t
+    m = re.match(r"X?(\d[\d:.]*)", t, re.I)  # X prefix = exhibition/scratched entry
+    return m.group(1).rstrip(".") if m else t
 
 
 def time_suffix(t: str) -> str | None:
@@ -125,9 +125,16 @@ RE_DT_EVENT = re.compile(
     r"(.+?)\s+(\d+)\s+([A-Za-z]+)\s*\(\s*([^)]+?)\s*\)"
 )  # groups: 1=num 2=day 3=timeline 4=gender 5=ageband 6=distance 7=stroke 8=time
 
-# Family 1: Hy-Tek "All Events" event  e.g.  #1 Mixed 400 IM 8:15.00 1/4
+# Family 1a: Hy-Tek "All Events" report  e.g.  #1 Mixed 400 IM 8:15.00 1/4
 RE_HYTEK_EVENT = re.compile(
     r"#(\d+)\s+([A-Za-z/]+)\s+(\d+)\s+([A-Za-z]+)\s+(NT|[\d:.]+)\s+\d+\s*/\s*\d+"
+)
+# Family 1b: Hy-Tek "Team Entries" report
+#   with age group:    #104 Girls 9&O 100 Free 1:21.47S
+#   without age group: #2 Boys 50 Fly 42.18
+# (no heat/lane suffix; age-group token optional — may contain & or digits e.g. "9&O")
+RE_HYTEK_TEAM_EVENT = re.compile(
+    r"#(\d+)\s+(Girls?|Boys?|Mixed|Open(?:/Male)?)\s+(?:\S+\s+)?(\d+)\s+([A-Za-z]+)\s+(NT|X?[\d:.]+[SLsl]?)"
 )
 RE_HYTEK_SWIMMER = re.compile(
     r"^\s*\d+\s+(.+?)\s+-\s+(Male|Female)\s+-\s+Age:\s*(\d+)\s+-\s+Ind/Rel", re.I
@@ -308,7 +315,10 @@ def _parse_hytek(lines: list[str]):
             swimmers.append(cur)
             continue
         if cur is not None:
-            for me in RE_HYTEK_EVENT.finditer(line):
+            found = list(RE_HYTEK_EVENT.finditer(line))
+            if not found:
+                found = list(RE_HYTEK_TEAM_EVENT.finditer(line))
+            for me in found:
                 _add_entry(cur, int(me.group(1)), me.group(2), me.group(3),
                            me.group(4), me.group(5), suffixes)
     return swimmers, suffixes
@@ -377,21 +387,35 @@ def parse_meet_pack(text: str) -> ParsedPack:
     event_session: dict[int, int] = {}
     session_labels: dict[int, str] = {}
     cur_session: int | None = None
+    cur_paired: int | None = None  # second session from a two-column header line
     cur_day = ""
     for line in lines:
         dm = RE_DAY.search(line)
         if dm:
             cur_day = dm.group(1).strip()
-        sm = RE_SESSION_HDR.search(line)
-        if sm:
-            # ignore prose like "each session"; require it to look like a header
-            if re.match(r"^\s*session\s+\d+\s*$", line.strip(), re.I) or len(line.strip()) < 30:
-                cur_session = int(sm.group(1))
-                session_labels[cur_session] = cur_day
-        for em in RE_EVENT_NUM.finditer(line):
-            n = int(em.group(1))
-            if cur_session is not None and n not in event_session:
-                event_session[n] = cur_session
+        # Collect all session numbers on this line (handles "SESSION 1 SESSION 2" two-column layout)
+        session_nums = [int(m.group(1)) for m in RE_SESSION_HDR.finditer(line)]
+        if session_nums:
+            stripped = line.strip()
+            is_header = (re.match(r"^\s*session\s+[\d\s]+\s*$", stripped, re.I)
+                         or len(stripped) < 40)
+            if is_header:
+                cur_session = session_nums[0]
+                cur_paired = session_nums[1] if len(session_nums) >= 2 else None
+                for sn in session_nums:
+                    session_labels.setdefault(sn, cur_day)
+        events_on_line = [int(em.group(1)) for em in RE_EVENT_NUM.finditer(line)]
+        if cur_session is not None and events_on_line:
+            # When two sessions share a column layout, split events between them evenly
+            if cur_paired is not None and len(events_on_line) > 1:
+                half = len(events_on_line) // 2
+                for i, n in enumerate(events_on_line):
+                    if n not in event_session:
+                        event_session[n] = cur_session if i < half else cur_paired
+            else:
+                for n in events_on_line:
+                    if n not in event_session:
+                        event_session[n] = cur_session
 
     venue = ""
     vm = re.search(r"Location:\s*([^)\n]+)", text)

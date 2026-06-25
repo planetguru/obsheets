@@ -10,6 +10,7 @@ Run (prod):  venv/bin/gunicorn -w 1 --threads 8 -b 0.0.0.0:8000 app:app
              (one worker + threads so background generation shares state)
 """
 from __future__ import annotations
+import io
 import json
 import os
 import threading
@@ -203,6 +204,17 @@ def delete(job_id: str):
     return jsonify({"ok": True})
 
 
+@app.get("/blank/<sheet_type>")
+def blank_sheet(sheet_type: str):
+    if sheet_type not in ('regular', 'long', 'sprint'):
+        abort(404)
+    pdf = pdfgen.blank_pdf(sheet_type)
+    names = {'long': 'LongDistanceSheets.pdf', 'sprint': 'SprintSheets.pdf'}
+    name = names.get(sheet_type, 'RegularSheets.pdf')
+    return send_file(io.BytesIO(pdf), mimetype='application/pdf',
+                     as_attachment=False, download_name=name)
+
+
 # ── single-page front-end ─────────────────────────────────────────────────────
 
 INDEX_HTML = r"""<!doctype html>
@@ -260,6 +272,12 @@ INDEX_HTML = r"""<!doctype html>
   .del{background:none;border:none;color:var(--gray);cursor:pointer;font-size:16px;padding:4px 8px;}
   .del:hover{color:#c0392b;}
   .empty{color:var(--gray);font-size:14px;}
+  .blank-btn{display:inline-flex;flex-direction:column;gap:4px;padding:13px 18px;min-width:190px;
+    border:2px solid var(--accent);border-radius:10px;text-decoration:none;
+    color:var(--accent);background:var(--soft);}
+  .blank-btn:hover{background:#dcebf7;}
+  .bb-title{font-weight:800;font-size:15px;}
+  .bb-sub{font-size:11.5px;color:var(--gray);}
 </style>
 </head>
 <body>
@@ -285,6 +303,25 @@ INDEX_HTML = r"""<!doctype html>
     <input type="file" id="fi-entries" accept=".pdf,application/pdf" style="display:none">
     <input type="file" id="fi-meetpack" accept=".pdf,application/pdf" style="display:none">
     <button class="go" id="go" disabled>Generate Observation Sheets</button>
+  </div>
+
+  <div class="card">
+    <h2>Blank sheets</h2>
+    <p style="font-size:13.5px;color:var(--gray);margin:0 0 14px">No paperwork needed — download pre-formatted blank recording sheets.</p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <a href="blank/sprint" target="_blank" class="blank-btn">
+        <span class="bb-title">Sprint</span>
+        <span class="bb-sub">4 × 25m splits · SC 50m &amp; 100m · 5/page · 2 pages</span>
+      </a>
+      <a href="blank/regular" target="_blank" class="blank-btn">
+        <span class="bb-title">Regular</span>
+        <span class="bb-sub">8 × 50m splits · 5 swimmers/page · 2 pages</span>
+      </a>
+      <a href="blank/long" target="_blank" class="blank-btn">
+        <span class="bb-title">Long Distance</span>
+        <span class="bb-sub">30 × 50m splits · 3 swimmers/page · 2 pages</span>
+      </a>
+    </div>
   </div>
 
   <div class="card">
@@ -344,7 +381,7 @@ $('go').addEventListener('click', async ()=>{
   if(files.meetpack) fd.append('meetpack', files.meetpack);
   $('go').disabled = true;
   try{
-    const r = await fetch('/api/generate', {method:'POST', body:fd});
+    const r = await fetch('api/generate', {method:'POST', body:fd});
     const j = await r.json();
     if(!j.ok){ showErr(j.error||'Generation failed.'); $('go').disabled=false; return; }
     files.entries=null; files.meetpack=null; renderSlot('entries'); renderSlot('meetpack');
@@ -358,7 +395,7 @@ function jobRow(j){
     const sub = j.entry_count+' entries · '+sess+' session'+(sess!==1?'s':'')+
       ' · '+(j.course==='long'?'long course (50m)':'short course (25m)');
     let warn = (j.warnings&&j.warnings.length)? '<div class="warn">⚠ '+j.warnings.join(' ')+'</div>':'';
-    return '<a class="job ready" href="/download/'+j.id+'" target="_blank">'+
+    return '<a class="job ready" href="download/'+j.id+'" target="_blank">'+
       '<div class="nm"><div class="title">'+esc(j.meet_name)+'</div><div class="sub">'+sub+'</div>'+warn+'</div>'+
       '<span class="badge ready">Ready ↓</span>'+
       '<button class="del" title="Remove" onclick="del(event,\''+j.id+'\')">✕</button></a>';
@@ -377,12 +414,12 @@ function jobRow(j){
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 async function del(e, id){ e.preventDefault(); e.stopPropagation();
-  await fetch('/api/delete/'+id, {method:'POST'}); poll(); }
+  await fetch('api/delete/'+id, {method:'POST'}); poll(); }
 
 let timer=null;
 async function poll(){
   try{
-    const jobs = await (await fetch('/api/jobs')).json();
+    const jobs = await (await fetch('api/jobs')).json();
     const list=$('list');
     if(!jobs.length){ list.innerHTML='<p class="empty">Generated sheets will appear here.</p>'; }
     else { list.innerHTML = jobs.map(jobRow).join(''); }

@@ -129,19 +129,26 @@ BOX_GAP = 8       # gap between swimmer boxes
 EVH = 32          # event header height
 
 def _splits_layout(distance, pool_len):
-    """Return (n_boxes, per_row, rows) for the splits grid, or (0,0,0)."""
+    """Return (n_boxes, per_row, rows, interval) for the splits grid, or (0,0,0,0).
+
+    SC (pool_len=25) + distance <= 100 → 25m splits
+    SC (pool_len=25) + distance > 100  → 50m splits
+    LC (pool_len=50)                   → 50m splits always
+    """
     if distance <= pool_len:
-        return 0, 0, 0
-    n = distance // pool_len
-    label_w = text_w(f"{pool_len}m splits", 7) + 8
-    per_row = max(1, int((CW - 2 * PAD - label_w) // (SPLIT_W + 5)))
-    return n, per_row, math.ceil(n / per_row)
+        return 0, 0, 0, 0
+    interval = 25 if (pool_len == 25 and distance <= 100) else 50
+    n = distance // interval
+    # Label is drawn above the grid so full content width is available for boxes
+    max_per_row = max(1, int((CW - 2 * PAD + 5) / (SPLIT_W + 5)))
+    per_row = min(n, max_per_row)
+    return n, per_row, math.ceil(n / per_row), interval
 
 def _box_height(distance, pool_len):
-    n, _, rows = _splits_layout(distance, pool_len)
+    n, _, rows, _iv = _splits_layout(distance, pool_len)
     h = PAD + ROW1
     if n:
-        h += 7 + rows * (8 + SPLIT_H + 4)
+        h += 7 + 10 + rows * (8 + SPLIT_H + 4)  # 10 = space for above-grid label
     h += 8 + 9 + COMMENT_H + PAD
     return h
 
@@ -182,19 +189,21 @@ def _swimmer_box(d, y, sw, ev_num, distance, pool_len):
         d.text(nx, cy + 13.5, f"({sw['age']})", 9.5, color=GRAY)
     cy += ROW1 + 7
 
-    # Splits grid
-    n, per_row, rows = _splits_layout(distance, pool_len)
+    # Splits grid — label above, boxes fill full content width
+    n, per_row, rows, interval = _splits_layout(distance, pool_len)
     if n:
-        lab = f"{pool_len}m splits"
-        d.text(x + PAD, cy + 8 + SPLIT_H - 3, lab.upper(), 6.3, bold=True, color=GRAY)
-        gx0 = x + PAD + text_w(lab, 7) + 10
+        lab = f"{interval}m splits"
+        d.text(x + PAD, cy + 7, lab.upper(), 6.3, bold=True, color=GRAY)
+        cy += 10
+        gx0 = x + PAD
+        box_w = (CW - 2 * PAD - (per_row - 1) * 5) / per_row
         for i in range(n):
             r_, c_ = divmod(i, per_row)
-            bx = gx0 + c_ * (SPLIT_W + 5)
+            bx = gx0 + c_ * (box_w + 5)
             by = cy + r_ * (8 + SPLIT_H + 4)
-            d.text(bx + (SPLIT_W - text_w(str((i + 1) * pool_len), 6.3)) / 2,
-                   by + 6, str((i + 1) * pool_len), 6.3, color=LGRAY)
-            d.rect(bx, by + 8, SPLIT_W, SPLIT_H, stroke=INK, lw=0.9, r=3)
+            d.text(bx + (box_w - text_w(str((i + 1) * interval), 6.3)) / 2,
+                   by + 6, str((i + 1) * interval), 6.3, color=LGRAY)
+            d.rect(bx, by + 8, box_w, SPLIT_H, stroke=INK, lw=0.9, r=3)
         cy += rows * (8 + SPLIT_H + 4)
     cy += 8
 
@@ -215,10 +224,11 @@ def _event_header(d, y, ev, pool_len, cont=False):
     title = f"{ev['gender']}  ·  {ev['distance']}m {STROKE_NAMES.get(ev['stroke'], ev['stroke'])}"
     d.text(x, ty, title, 11.5, bold=True, color=ACCENT)
     n = len(ev['swimmers'])
-    n_splits = ev['distance'] // pool_len if ev['distance'] > pool_len else 0
     meta = f"{n} swimmer{'s' if n != 1 else ''}"
-    if n_splits:
-        meta += f"  ·  {n_splits} × {pool_len}m"
+    if ev['distance'] > pool_len:
+        interval = 25 if (pool_len == 25 and ev['distance'] <= 100) else 50
+        n_splits = ev['distance'] // interval
+        meta += f"  ·  {n_splits} × {interval}m"
     d.text(M + CW - 12 - text_w(meta, 8.5), ty - 0.5, meta, 8.5, color=GRAY)
     return EVH
 
@@ -291,4 +301,110 @@ def meet_to_pdf(meet) -> bytes:
         label = s.label or meet.dates or ""
         add_session(d, s.number, sess_data, meet.name, club, meet.venue,
                     meet.course, label)
+    return d.build()
+
+
+# ── BLANK SHEETS ──────────────────────────────────────────────────────────────
+
+def _blank_box_height(sheet_type: str) -> float:
+    if sheet_type == 'long':
+        # 10pt for above-grid SPLITS label, then 3 rows × (8 label + 25 box + 6 gap)
+        return PAD + ROW1 + 7 + 10 + 3 * (8 + 25 + 6) + 8 + 9 + COMMENT_H + PAD
+    # 'regular' and 'sprint' both have one row of splits boxes
+    return PAD + ROW1 + 7 + 1 * (8 + 21 + 4) + 8 + 9 + COMMENT_H + PAD
+
+
+def _blank_swimmer_box(d: Doc, y: float, sheet_type: str) -> float:
+    """Draw one blank swimmer observation box; return its height."""
+    h = _blank_box_height(sheet_type)
+    x = M
+    d.rect(x, y, CW, h, stroke=LINE, lw=1.1, r=6)
+    cy = y + PAD
+
+    # Row 1 — fields right-to-left, then NAME fills remaining space
+    xr = x + CW - PAD
+    xr = _field(d, xr, cy, 'TIME', 66) - 12
+    xr = _field(d, xr, cy, 'ENTRY', 60) - 12
+    xr = _field(d, xr, cy, 'HEAT', 44) - 12
+    xr = _field(d, xr, cy, 'AGE', 34) - 8
+    nx = x + PAD
+    lw_name = text_w('NAME', 6.3, True)
+    d.text(nx, cy + 12.5, 'NAME', 6.3, bold=True, color=GRAY)
+    d.rect(nx + lw_name + 5, cy, xr - nx - lw_name - 5, ROW1, stroke=INK, lw=0.9, r=3)
+    cy += ROW1 + 7
+
+    # Splits grid
+    if sheet_type == 'long':
+        # Label above the grid; boxes span the full content width (10 per row)
+        n_sp, step, sw_, sh_, sg, per_row, inter = 30, 50, 46, 25, 5, 10, 6
+        d.text(x + PAD, cy + 7, 'SPLITS', 6.3, bold=True, color=GRAY)
+        cy += 10
+        gx0 = x + PAD
+    elif sheet_type == 'sprint':
+        # 4 wide boxes at 25m intervals (SC 50m / 100m events)
+        n_sp, step, sw_, sh_, sg, per_row, inter = 4, 25, 80, 21, 8, 4, 4
+        d.text(x + PAD, cy + 8 + sh_ - 3, 'SPLITS', 6.3, bold=True, color=GRAY)
+        gx0 = x + PAD + text_w('SPLITS', 7, True) + 10
+    else:
+        # Label to the left of the grid (8 boxes fit in one row)
+        n_sp, step, sw_, sh_, sg, per_row, inter = 8, 50, 42, 21, 5, 8, 4
+        d.text(x + PAD, cy + 8 + sh_ - 3, 'SPLITS', 6.3, bold=True, color=GRAY)
+        gx0 = x + PAD + text_w('SPLITS', 7, True) + 10
+    rows = math.ceil(n_sp / per_row)
+    for i in range(n_sp):
+        r_, c_ = divmod(i, per_row)
+        bx = gx0 + c_ * (sw_ + sg)
+        by = cy + r_ * (8 + sh_ + inter)
+        lbl = str((i + 1) * step)
+        d.text(bx + (sw_ - text_w(lbl, 6.3)) / 2, by + 6, lbl, 6.3, color=LGRAY)
+        d.rect(bx, by + 8, sw_, sh_, stroke=INK, lw=0.9, r=3)
+    cy += rows * (8 + sh_ + inter) + 8
+
+    # Comments
+    d.text(x + PAD, cy + 6, "COACH'S COMMENTS", 6.3, bold=True, color=GRAY)
+    cy += 9
+    d.rect(x + PAD, cy, CW - 2 * PAD, COMMENT_H, stroke=INK, lw=0.9, r=4)
+    d.hline(x + PAD + 4, x + CW - PAD - 4, cy + COMMENT_H / 2, color=RULE, lw=0.8)
+    return h
+
+
+def blank_pdf(sheet_type: str) -> bytes:
+    """Generate a 2-page blank observation sheet PDF.
+
+    sheet_type='regular': 8 splits per swimmer (up to 400 m), 5 swimmers/page.
+    sheet_type='long':   30 splits per swimmer (up to 1500 m), 4 swimmers/page.
+    """
+    d = Doc()
+    bh = _blank_box_height(sheet_type)
+    header_h, header_gap = 40, 10
+    bottom = H - M - 14
+    avail = bottom - M - header_h - header_gap
+    n_per_page = max(1, int((avail + BOX_GAP) / (bh + BOX_GAP)))
+
+    if sheet_type == 'long':
+        title = 'Long Distance Observation Sheets'
+        sub   = 'Bridgwater ASC  ·  Coach Recording'
+    elif sheet_type == 'sprint':
+        title = 'Sprint Observation Sheets  —  Short Course'
+        sub   = 'Bridgwater ASC  ·  4 × 25m splits (50m & 100m events)  ·  Coach Recording'
+    else:
+        title = 'Observation Sheets  —  Blank'
+        sub   = 'Bridgwater ASC  ·  8 splits per swimmer  ·  Coach Recording'
+
+    for page_num in range(1, 3):
+        d.page()
+        y = M
+        # Header bar
+        d.rect(M, y, CW, header_h, stroke=INK, fill=(1, 1, 1), lw=1.8, r=8)
+        d.text(M + 14, y + 16, title, 13, bold=True, color=INK)
+        d.text(M + 14, y + 31, sub, 8.5, color=GRAY)
+        pn = f'Page {page_num} of 2'
+        d.text(M + CW - 12 - text_w(pn, 8.5), y + 22, pn, 8.5, color=GRAY)
+        # Footer
+        d.text(M + CW - text_w(pn, 7.5), H - M + 6, pn, 7.5, color=LGRAY)
+        y += header_h + header_gap
+        for _ in range(n_per_page):
+            _blank_swimmer_box(d, y, sheet_type)
+            y += bh + BOX_GAP
+
     return d.build()
